@@ -84,7 +84,7 @@ bool LoadPreset(const std::string& name, Simulation& sim, std::string& msg) {
             if ((int)row.size() != n) throw std::runtime_error("行列が正方でない");
         sim.setNumTypes(n);
         for (int a = 0; a < n; ++a)
-            for (int b = 0; b < n; ++b) sim.weak[a][b] = std::clamp(m[a][b].get<float>(), -1.0f, 1.0f);
+            for (int b = 0; b < n; ++b) sim.weak[a][b] = std::clamp(m[a][b].get<float>(), -10.0f, 10.0f);
         msg = "読み込みました: " + name + " (" + std::to_string(n) + "種類)";
         return true;
     } catch (const std::exception& e) {

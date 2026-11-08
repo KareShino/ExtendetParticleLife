@@ -48,13 +48,13 @@ static void LoadJapaneseFont(float sizePx) {
     io.Fonts->AddFontDefault();
 }
 
-static void SetupInitialScene(Simulation& sim, AppState& st) {
-    sim.setNumTypes(3);
+static void SetupInitialScene(Simulation& sim, AppState& st, int types) {
+    sim.setNumTypes(types);
     sim.randomizeWeak();
     const int val[3] = {2, 1, 3};
-    for (int a = 0; a < 3; ++a) {
-        sim.valence[a] = val[a];
-        for (int b = 0; b < 3; ++b) sim.canBond[a][b] = true;
+    for (int a = 0; a < sim.numTypes; ++a) {
+        sim.valence[a] = val[a % 3];
+        for (int b = 0; b < sim.numTypes; ++b) sim.canBond[a][b] = true;
     }
     sim.randomFill(st.cap, st.ratios);
 }
@@ -100,9 +100,11 @@ int main(int argc, char** argv) {
     ThreadPool pool;
     Simulation sim(pool);
     AppState st;
-    if (argc > 1) st.cap = std::clamp(std::atoi(argv[1]), 0, 30000);  // 任意: 初期粒子数
-    if (argc > 2) sim.world = st.worldEdit = std::clamp((float)std::atof(argv[2]), 0.5f, 5.0f);  // 任意: 世界の広さ
-    SetupInitialScene(sim, st);
+    if (argc > 1) st.cap = std::clamp(std::atoi(argv[1]), 0, AppState::kMaxParticles);  // 任意: 初期粒子数
+    if (argc > 2) sim.world = st.worldEdit = std::clamp((float)std::atof(argv[2]), 0.05f, 1000.0f);  // 任意: 世界の広さ
+    const int types = argc > 3 ? std::clamp(std::atoi(argv[3]), 1, kMaxTypes) : 3;  // 任意: 初期の種類数
+    SetupInitialScene(sim, st, types);
+    st.numTypesEdit = sim.numTypes;
 
     while (!glfwWindowShouldClose(win)) {
         glfwPollEvents();
@@ -114,9 +116,13 @@ int main(int argc, char** argv) {
         if (!st.paused) {
             auto t0 = std::chrono::steady_clock::now();
             st.stepAcc += st.speed;
-            const int steps = std::min(20, (int)st.stepAcc);
+            const int steps = std::min(AppState::kMaxStepsPerFrame, (int)st.stepAcc);
             st.stepAcc -= (float)(int)st.stepAcc;
-            for (int i = 0; i < steps; ++i) sim.step();
+            for (int i = 0; i < steps; ++i) {
+                sim.step();
+                // 1 フレームの計算は 50ms までに抑えて UI の応答性を保つ (超過分は捨てる)
+                if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(50)) break;
+            }
             double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             st.simMs = st.simMs * 0.9 + ms * 0.1;
         }

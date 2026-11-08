@@ -7,6 +7,8 @@
 #include "gl_loader.h"
 
 Color TypeColor(int t, float sat, float val) {
+    // 色相は 30 度刻みで 12 種類ごとに一周。周回ごとに明度を下げて区別する
+    val *= std::pow(0.55f, (float)(t / 12));
     float h = std::fmod(t * 30.0f, 360.0f) / 60.0f;
     float c = val * sat;
     float x = c * (1.0f - std::fabs(std::fmod(h, 2.0f) - 1.0f));

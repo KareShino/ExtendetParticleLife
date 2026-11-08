@@ -8,7 +8,7 @@
 
 class ThreadPool;
 
-constexpr int kMaxTypes = 12;
+constexpr int kMaxTypes = 24;
 constexpr int kMaxBonds = 4;  // 粒子あたりの結合スロット数 (価数の上限)
 
 struct SimParams {
@@ -59,6 +59,7 @@ public:
     void setCanBond(int a, int b, bool v) { canBond[a][b] = canBond[b][a] = v; }
 
     void step();
+    static inline bool simdEnabled = true;  // AVX2 カーネルを使う (CPU 非対応時は自動で無効)
     uint64_t stepCount() const { return stepCounter_; }
 
 private:
@@ -96,5 +97,6 @@ private:
 
     // 作業領域
     std::vector<float> ax_, ay_;
+    std::vector<uint8_t> cutMask_;
     std::vector<std::vector<std::pair<int, int>>> candidates_;
 };

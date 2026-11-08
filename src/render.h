@@ -6,7 +6,7 @@
 
 struct Color { float r, g, b; };
 
-// 種類 ID ごとの色: 色相 30 度刻み、彩度・明度は全種類共通
+// 種類 ID ごとの色: 色相 30 度刻み、彩度・明度は全種類共通 (13 種類目以降は周回ごとに明度を下げる)
 Color TypeColor(int t, float sat, float val);
 
 class Renderer {

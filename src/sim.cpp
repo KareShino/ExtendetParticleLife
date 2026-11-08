@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <immintrin.h>
+#include <intrin.h>
 
 #include "parallel.h"
 
@@ -19,6 +21,82 @@ inline uint32_t hash3(uint32_t a, uint32_t b, uint32_t c) {
     return hash32(a ^ hash32(b + 0x9e3779b9u + hash32(c)));
 }
 inline float u01(uint32_t h) { return (h >> 8) * (1.0f / 16777216.0f); }
+
+// ---- AVX2 カーネル (実行時に CPU 対応を確認し、非対応ならスカラー版を使う) ----
+bool CpuHasAVX2() {
+    int r[4];
+    __cpuid(r, 0);
+    if (r[0] < 7) return false;
+    __cpuid(r, 1);
+    const bool osxsave = (r[2] & (1 << 27)) != 0, avx = (r[2] & (1 << 28)) != 0;
+    if (!osxsave || !avx || (_xgetbv(0) & 6) != 6) return false;
+    __cpuidex(r, 7, 0);
+    return (r[1] & (1 << 5)) != 0;
+}
+const bool kHasAVX2 = CpuHasAVX2();
+
+struct KernelArgs {
+    float rMax2, invR, beta, invBeta, inv1mb, bondD2;
+    const float* wrow;
+    int b0, b1, b2, b3;
+    bool iHasBond, iFree;
+};
+
+// 区間 [b, e) の粒子から受ける弱い力を 8 個ずつ計算する (fx, fy に加算。倍率は呼び出し側)
+template <class F>
+inline void ForceSegAVX2(const float* sx, const float* sy, const uint8_t* st, const int* sorted, int b, int e,
+                         float ox, float oy, const KernelArgs& k, float& fx, float& fy, F&& tryBond) {
+    const __m256 vox = _mm256_set1_ps(ox), voy = _mm256_set1_ps(oy);
+    const __m256 vR2 = _mm256_set1_ps(k.rMax2), vEps = _mm256_set1_ps(1e-12f);
+    const __m256 vInvR = _mm256_set1_ps(k.invR), vBeta = _mm256_set1_ps(k.beta);
+    const __m256 vInvB = _mm256_set1_ps(k.invBeta), vInv1mb = _mm256_set1_ps(k.inv1mb);
+    const __m256 one = _mm256_set1_ps(1.0f), two = _mm256_set1_ps(2.0f), onePb = _mm256_set1_ps(1.0f + k.beta);
+    const __m256 absMask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff));
+    const __m256 zero = _mm256_setzero_ps(), vBD2 = _mm256_set1_ps(k.bondD2);
+    const __m256i lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    const __m256i vb0 = _mm256_set1_epi32(k.b0), vb1 = _mm256_set1_epi32(k.b1);
+    const __m256i vb2 = _mm256_set1_epi32(k.b2), vb3 = _mm256_set1_epi32(k.b3);
+    __m256 afx = zero, afy = zero;
+    for (int m = b; m < e; m += 8) {
+        const __m256 dx = _mm256_add_ps(_mm256_loadu_ps(sx + m), vox);
+        const __m256 dy = _mm256_add_ps(_mm256_loadu_ps(sy + m), voy);
+        const __m256 d2 = _mm256_add_ps(_mm256_mul_ps(dx, dx), _mm256_mul_ps(dy, dy));
+        const __m256 tail = _mm256_castsi256_ps(_mm256_cmpgt_epi32(_mm256_set1_epi32(e - m), lane));
+        const __m256 in = _mm256_and_ps(
+            _mm256_and_ps(_mm256_cmp_ps(d2, vR2, _CMP_LT_OQ), _mm256_cmp_ps(d2, vEps, _CMP_GT_OQ)), tail);
+        if (_mm256_movemask_ps(in) == 0) continue;
+        const __m256 d = _mm256_sqrt_ps(_mm256_max_ps(d2, vEps));
+        const __m256 r = _mm256_mul_ps(d, vInvR);
+        const __m256 rep = _mm256_sub_ps(_mm256_mul_ps(r, vInvB), one);
+        const __m256i idx = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(st + m)));
+        const __m256 w = _mm256_i32gather_ps(k.wrow, idx, 4);
+        const __m256 t = _mm256_and_ps(_mm256_sub_ps(_mm256_mul_ps(two, r), onePb), absMask);
+        const __m256 tri = _mm256_mul_ps(w, _mm256_sub_ps(one, _mm256_mul_ps(t, vInv1mb)));
+        __m256 f = _mm256_blendv_ps(tri, rep, _mm256_cmp_ps(r, vBeta, _CMP_LT_OQ));
+        if (k.iHasBond) {  // 結合済みペアには引力側を働かせない
+            const __m256i j = _mm256_loadu_si256((const __m256i*)(sorted + m));
+            const __m256i bm = _mm256_or_si256(_mm256_or_si256(_mm256_cmpeq_epi32(j, vb0), _mm256_cmpeq_epi32(j, vb1)),
+                                               _mm256_or_si256(_mm256_cmpeq_epi32(j, vb2), _mm256_cmpeq_epi32(j, vb3)));
+            f = _mm256_andnot_ps(_mm256_and_ps(_mm256_castsi256_ps(bm), _mm256_cmp_ps(f, zero, _CMP_GT_OQ)), f);
+        }
+        const __m256 s = _mm256_and_ps(_mm256_div_ps(f, d), in);
+        afx = _mm256_add_ps(afx, _mm256_mul_ps(dx, s));
+        afy = _mm256_add_ps(afy, _mm256_mul_ps(dy, s));
+        if (k.iFree) {
+            int bits = _mm256_movemask_ps(_mm256_and_ps(_mm256_cmp_ps(d2, vBD2, _CMP_LT_OQ), in));
+            while (bits) {
+                unsigned long l;
+                _BitScanForward(&l, (unsigned long)bits);
+                bits &= bits - 1;
+                tryBond(m + (int)l);
+            }
+        }
+    }
+    alignas(32) float hx[8], hy[8];
+    _mm256_store_ps(hx, afx);
+    _mm256_store_ps(hy, afy);
+    for (int q = 0; q < 8; ++q) { fx += hx[q]; fy += hy[q]; }
+}
 
 
 }  // namespace
@@ -162,7 +240,7 @@ void Simulation::randomizeWeak() {
 void Simulation::buildGrid() {
     const int n = count();
     float cell = std::min(std::max(p.rMax, p.bondDist), world * 0.45f);
-    gridN_ = std::max(1, std::min(256, (int)(world / cell)));
+    gridN_ = std::max(1, std::min(1024, (int)(world / cell)));
     const int G = gridN_, cells = G * G;
     const float invCell = G / world;
     cellStart_.assign(cells + 1, 0);
@@ -175,8 +253,9 @@ void Simulation::buildGrid() {
         ++cellStart_[c + 1];
     }
     for (int c = 0; c < cells; ++c) cellStart_[c + 1] += cellStart_[c];
-    sorted_.resize(n);
-    sx_.resize(n); sy_.resize(n); st_.resize(n);
+    // SIMD で末尾を 8 要素単位で読めるよう余白を付ける (余白は遠方の値で範囲外になる)
+    sorted_.assign(n + 8, -1);
+    sx_.assign(n + 8, 1e15f); sy_.assign(n + 8, 1e15f); st_.assign(n + 8, 0);
     std::vector<int> cursor(cellStart_.begin(), cellStart_.end() - 1);
     for (int i = 0; i < n; ++i) {
         int k = cursor[cellOf_[i]]++;
@@ -185,15 +264,29 @@ void Simulation::buildGrid() {
     }
 }
 
+#ifdef SIM_PROFILE
+#include <chrono>
+double g_prof[5];
+#include <atomic>
+std::atomic<long long> g_pairs{0};
+#define PROF_MARK(k) { auto _t = std::chrono::steady_clock::now(); g_prof[k] += std::chrono::duration<double, std::milli>(_t - _pt).count(); _pt = _t; }
+#else
+#define PROF_MARK(k)
+#endif
+
 void Simulation::step() {
     ++stepCounter_;
     const int n = count();
     if (n == 0) return;
+#ifdef SIM_PROFILE
+    auto _pt = std::chrono::steady_clock::now();
+#endif
     buildGrid();
+    PROF_MARK(0);
     ax_.resize(n);
     ay_.resize(n);
 
-    const int chunks = pool_.threadCount() * 4;
+    const int chunks = pool_.threadCount() * 32;
     if ((int)candidates_.size() < chunks) candidates_.resize(chunks);
     for (auto& c : candidates_) c.clear();
 
@@ -206,18 +299,14 @@ void Simulation::step() {
     const uint32_t bondThresh = (uint32_t)(std::clamp(p.bondProb, 0.0f, 1.0f) * 16777216.0f);
     const uint32_t seed = hash32((uint32_t)stepCounter_ * 2654435761u);
 
-    pool_.parallelFor(n, chunks, [&](int chunk, int b, int e) {
-        auto& cand = candidates_[chunk];
-        int nb[9];
-        for (int kk = b; kk < e; ++kk) {
-            const int i = sorted_[kk];
-            const float xi = sx_[kk], yi = sy_[kk];
-            const int ti = st_[kk];
-            const float* wrow = weak[ti];
-            const bool iHasBond = bondCount[i] > 0;
-            const bool iFree = bondCount[i] < valence[ti] && bondThresh > 0;
-            const int c = cellOf_[i], cx = c % G, cy = c / G;
-            int nn = 0;
+    // 近傍区間: セル (cx,cy) の周囲 3x3 を、行ごとの連続区間 + 折り返し用の座標シフトで表す
+    struct Seg { int b, e; float shx, shy; };
+    const bool generic = G < 3;  // セルが 3 未満なら重複を避けて最短像で計算
+    const float W = world;
+    auto buildSegs = [&](int cx, int cy, Seg* seg) -> int {
+        int ns = 0;
+        if (generic) {
+            int nb[9], nn = 0;
             for (int dy = -1; dy <= 1; ++dy)
                 for (int dx = -1; dx <= 1; ++dx) {
                     int cc = (cx + dx + G) % G + ((cy + dy + G) % G) * G;
@@ -225,33 +314,87 @@ void Simulation::step() {
                     for (int q = 0; q < nn; ++q) dup |= nb[q] == cc;
                     if (!dup) nb[nn++] = cc;
                 }
+            for (int q = 0; q < nn; ++q) seg[ns++] = {cellStart_[nb[q]], cellStart_[nb[q] + 1], 0.0f, 0.0f};
+            return ns;
+        }
+        for (int dy = -1; dy <= 1; ++dy) {
+            int ry = cy + dy;
+            float shy = 0.0f;
+            if (ry < 0) { ry += G; shy = -W; } else if (ry >= G) { ry -= G; shy = W; }
+            const int row = ry * G;
+            if (cx >= 1 && cx + 1 < G) {
+                seg[ns++] = {cellStart_[row + cx - 1], cellStart_[row + cx + 2], 0.0f, shy};
+            } else if (cx == 0) {
+                seg[ns++] = {cellStart_[row], cellStart_[row + 2], 0.0f, shy};
+                seg[ns++] = {cellStart_[row + G - 1], cellStart_[row + G], -W, shy};
+            } else {  // cx == G-1
+                seg[ns++] = {cellStart_[row + G - 2], cellStart_[row + G], 0.0f, shy};
+                seg[ns++] = {cellStart_[row], cellStart_[row + 1], W, shy};
+            }
+        }
+        return ns;
+    };
+
+    const bool useSimd = kHasAVX2 && simdEnabled && !generic;
+    // 粒子 (セル順に整列済み) 単位で分割して負荷を均す。区間はセルが変わったときだけ作り直す
+    pool_.parallelFor(n, chunks, [&](int chunk, int kb, int ke) {
+      auto& cand = candidates_[chunk];
+      Seg seg[9];
+      int ns = 0, curCell = -1;
+      {
+        for (int kk = kb; kk < ke; ++kk) {
+            const int i = sorted_[kk];
+            if (cellOf_[i] != curCell) {
+                curCell = cellOf_[i];
+                ns = buildSegs(curCell % G, curCell / G, seg);
+            }
+            const float xi = sx_[kk], yi = sy_[kk];
+            const int ti = st_[kk];
+            const float* wrow = weak[ti];
+            const bool iHasBond = bondCount[i] > 0;
+            const bool iFree = bondCount[i] < valence[ti] && bondThresh > 0;
+            const int b0 = bonds[i][0], b1 = bonds[i][1], b2 = bonds[i][2], b3 = bonds[i][3];
             float fx = 0.0f, fy = 0.0f;
-            for (int q = 0; q < nn; ++q) {
-                const int end = cellStart_[nb[q] + 1];
-                for (int m = cellStart_[nb[q]]; m < end; ++m) {
-                    if (m == kk) continue;
-                    float ddx = wd(sx_[m] - xi), ddy = wd(sy_[m] - yi);
-                    float d2 = ddx * ddx + ddy * ddy;
-                    if (d2 >= rMax2 || d2 < 1e-12f) continue;
-                    const float d = std::sqrt(d2), r = d * invR;
+#ifdef SIM_PROFILE
+            { long long c = 0; for (int q = 0; q < ns; ++q) c += seg[q].e - seg[q].b; g_pairs += c; }
+#endif
+            auto tryBond = [&](int m) {
+                const int j = sorted_[m], tj = st_[m];
+                if (j > i && canBond[ti][tj] && bondCount[j] < valence[tj] && !isBonded(i, j) &&
+                    (hash3(seed, (uint32_t)i, (uint32_t)j) >> 8) < bondThresh)
+                    cand.emplace_back(i, j);
+            };
+            if (useSimd) {
+                KernelArgs ka{rMax2, invR, beta, invBeta, inv1mb, bondD2, wrow, b0, b1, b2, b3, iHasBond, iFree};
+                for (int q = 0; q < ns; ++q)
+                    ForceSegAVX2(sx_.data(), sy_.data(), st_.data(), sorted_.data(), seg[q].b, seg[q].e,
+                                 seg[q].shx - xi, seg[q].shy - yi, ka, fx, fy, tryBond);
+                _mm256_zeroupper();
+            }
+            for (int q = 0; q < (useSimd ? 0 : ns); ++q) {
+                const int end = seg[q].e;
+                const float ox = seg[q].shx - xi, oy = seg[q].shy - yi;
+                for (int m = seg[q].b; m < end; ++m) {
+                    float ddx = sx_[m] + ox, ddy = sy_[m] + oy;
+                    if (generic) { ddx = wd(ddx); ddy = wd(ddy); }
+                    const float d2 = ddx * ddx + ddy * ddy;
+                    // 範囲判定・関数形の選択は分岐なし (select) で行い、分岐予測ミスを避ける
+                    const bool inR = (d2 < rMax2) & (d2 > 1e-12f);
+                    const float d = std::sqrt(std::max(d2, 1e-12f)), r = d * invR;
                     const int tj = st_[m];
-                    float f;
-                    if (r < beta) {
-                        f = r * invBeta - 1.0f;  // 共通の近距離斥力
-                    } else {
-                        f = wrow[tj] * (1.0f - std::fabs(2.0f * r - 1.0f - beta) * inv1mb);
-                        // 結合済みペアには引力側を働かせない
-                        if (f > 0.0f && iHasBond && isBonded(i, sorted_[m])) f = 0.0f;
+                    const float rep = r * invBeta - 1.0f;  // 共通の近距離斥力
+                    const float tri = wrow[tj] * (1.0f - std::fabs(2.0f * r - 1.0f - beta) * inv1mb);
+                    float f = r < beta ? rep : tri;
+                    // 結合済みペアには引力側を働かせない
+                    if (iHasBond) {
+                        const int j = sorted_[m];
+                        const bool bonded = (j == b0) | (j == b1) | (j == b2) | (j == b3);
+                        f = (bonded & (f > 0.0f)) ? 0.0f : f;
                     }
-                    const float s = f / d;
+                    const float s = inR ? f / d : 0.0f;
                     fx += ddx * s;
                     fy += ddy * s;
-                    if (iFree && d2 < bondD2) {
-                        const int j = sorted_[m];
-                        if (j > i && canBond[ti][tj] && bondCount[j] < valence[tj] && !isBonded(i, j) &&
-                            (hash3(seed, (uint32_t)i, (uint32_t)j) >> 8) < bondThresh)
-                            cand.emplace_back(i, j);
-                    }
+                    if (iFree && d2 < bondD2) tryBond(m);
                 }
             }
             fx *= ff;
@@ -272,7 +415,9 @@ void Simulation::step() {
             ax_[i] = fx;
             ay_[i] = fy;
         }
+      }
     });
+    PROF_MARK(1);
 
     const float dt = p.dt;
     const float fric = std::pow(0.5f, dt / std::max(1e-4f, p.frictionHalfLife));
@@ -293,8 +438,11 @@ void Simulation::step() {
         }
     });
 
+    PROF_MARK(2);
     formBonds();
+    PROF_MARK(3);
     breakBonds();
+    PROF_MARK(4);
 }
 
 void Simulation::formBonds() {
@@ -323,19 +471,29 @@ void Simulation::breakBonds() {
     const float bd2 = p.breakDist * p.breakDist;
     const uint32_t thresh = (uint32_t)(std::clamp(p.breakProb, 0.0f, 1.0f) * 16777216.0f);
     const uint32_t seed = hash32((uint32_t)stepCounter_ * 0x85ebca6bu + 77u);
-    for (int i = 0; i < n; ++i) {
-        if (!bondCount[i]) continue;
-        const int ti = type[i];
-        for (int s = 0; s < kMaxBonds; ++s) {
-            const int j = bonds[i][s];
-            if (j < 0) continue;
-            // 価数の超過 (価数を下げた場合) は常に切る
-            if (bondCount[i] > valence[ti]) { unlink(i, s); continue; }
-            if (j < i) continue;  // ペアは小さい方の添字側で 1 回だけ判定
-            float dx = wd(x[j] - x[i]), dy = wd(y[j] - y[i]);
-            bool cut = dx * dx + dy * dy > bd2 || !canBond[ti][type[j]] ||
-                       (thresh > 0 && (hash3(seed, (uint32_t)i, (uint32_t)j) >> 8) < thresh);
-            if (cut) unlink(i, s);
+    // 判定は並列 (読み取りのみ)。ペアは小さい方の添字側で 1 回だけ判定し、スロットごとのビットに記録
+    cutMask_.assign(n, 0);
+    pool_.parallelFor(n, pool_.threadCount() * 8, [&](int, int b, int e) {
+        for (int i = b; i < e; ++i) {
+            if (!bondCount[i]) continue;
+            const int ti = type[i];
+            uint8_t mask = 0;
+            for (int s = 0; s < kMaxBonds; ++s) {
+                const int j = bonds[i][s];
+                if (j < i) continue;
+                float dx = wd(x[j] - x[i]), dy = wd(y[j] - y[i]);
+                bool cut = dx * dx + dy * dy > bd2 || !canBond[ti][type[j]] ||
+                           (thresh > 0 && (hash3(seed, (uint32_t)i, (uint32_t)j) >> 8) < thresh);
+                if (cut) mask |= (uint8_t)(1u << s);
+            }
+            cutMask_[i] = mask;
         }
+    });
+    for (int i = 0; i < n; ++i) {
+        if (cutMask_[i])
+            for (int s = 0; s < kMaxBonds; ++s)
+                if (cutMask_[i] & (1u << s)) unlink(i, s);
+        // 価数の超過 (価数を下げた場合) は常に切る
+        for (int s = kMaxBonds - 1; s >= 0 && bondCount[i] > valence[type[i]]; --s) unlink(i, s);
     }
 }

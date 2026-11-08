@@ -5,6 +5,10 @@
 #include "sim.h"
 
 struct AppState {
+    static constexpr int kMaxParticles = 2000000;   // 粒子数上限の安全上限
+    static constexpr int kMaxStepsPerFrame = 200;   // 再生速度の安全上限 (倍)
+    int numTypesEdit = 3;     // 種類数 (入力中の値)
+
     // 配置
     int cap = 4000;           // 粒子数の上限
     int mode = 1;             // 0: 手動配置, 1: ランダム配置
