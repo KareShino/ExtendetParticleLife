@@ -56,6 +56,9 @@ public:
     void removeType(int t);
     void setNumTypes(int n);
     void randomizeWeak();
+    void randomizeCanBond();  // 各ペア 50% で結合可 (対称)
+    void randomizeValence();  // 0..kMaxBonds の一様
+    void randomizeParams();   // 共通パラメータを妥当な範囲でランダム化
     void setCanBond(int a, int b, bool v) { canBond[a][b] = canBond[b][a] = v; }
 
     void step();

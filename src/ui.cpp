@@ -120,6 +120,11 @@ void ApplyNumTypes(Simulation& sim, AppState& st, int n) {
 void ParamsSection(Simulation& sim, AppState& st) {
     if (!ImGui::CollapsingHeader("共通パラメータ", ImGuiTreeNodeFlags_DefaultOpen)) return;
     auto& p = sim.p;
+    if (ImGui::SmallButton("ランダム##params")) sim.randomizeParams();
+    ImGui::SameLine();
+    if (ImGui::SmallButton("初期値に戻す")) p = SimParams{};
+    HelpMarker("ランダム: 各値を目安範囲内で生成 (結合距離 ≥ ボンド長、切断距離 > 結合距離 になるよう調整)。\n"
+               "世界の広さ・再生速度は変えません");
     const float maxR = sim.world * 0.45f;  // ループ空間で最短像を保てる上限
     const ImGuiSliderFlags LOG = ImGuiSliderFlags_Logarithmic;
     ImGui::PushItemWidth(-ImGui::GetFontSize() * 7.5f);
@@ -232,10 +237,12 @@ void WeakTable(Simulation& sim, AppState& st) {
 void BondTable(Simulation& sim, AppState& st) {
     if (!ImGui::CollapsingHeader("結合可否テーブル", ImGuiTreeNodeFlags_DefaultOpen)) return;
     const int n = sim.numTypes;
+    if (ImGui::SmallButton("ランダム##bond")) sim.randomizeCanBond();
+    ImGui::SameLine();
     if (ImGui::SmallButton("全て可")) for (int a = 0; a < n; ++a) for (int b = 0; b < n; ++b) sim.canBond[a][b] = true;
     ImGui::SameLine();
     if (ImGui::SmallButton("全て不可")) for (int a = 0; a < n; ++a) for (int b = 0; b < n; ++b) sim.canBond[a][b] = false;
-    HelpMarker("対称。チェックした種類の組み合わせが結合しうる");
+    HelpMarker("対称。チェックした種類の組み合わせが結合しうる\nランダム: 各組み合わせを 50% で可にする");
     if (BeginTypeTable("bond", n, ImGui::GetFrameHeight(), 0)) {
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
@@ -261,8 +268,8 @@ void BondTable(Simulation& sim, AppState& st) {
 
 void ValenceTable(Simulation& sim, AppState& st) {
     if (!ImGui::CollapsingHeader("価数テーブル", ImGuiTreeNodeFlags_DefaultOpen)) return;
-    ImGui::SameLine();
-    HelpMarker("価数は粒子あたりの結合スロット数 (0〜4)");
+    if (ImGui::SmallButton("ランダム##val")) sim.randomizeValence();
+    HelpMarker("価数は粒子あたりの結合スロット数 (0〜4)\nランダム: 種類ごとに 0〜4 の一様乱数");
     int removeT = -1;
     if (ImGui::BeginTable("val", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
         ImGui::TableSetupColumn("色");
@@ -312,6 +319,13 @@ void RightPanel(Simulation& sim, AppState& st, float x, float w, float h) {
     FreeFloat("再生速度(倍)", &st.speed, 0.1f, 10.0f, 0.01f, (float)AppState::kMaxStepsPerFrame, "%.2f",
               ImGuiSliderFlags_Logarithmic, nullptr, ImGui::GetFontSize() * 14.0f);
     HelpMarker("1倍 = 1フレームに1ステップ。1未満は数フレームに1ステップ。\n入力欄では 0.01〜200 倍まで指定可");
+    if (ImGui::Button("すべてランダム")) {
+        sim.randomizeWeak();
+        sim.randomizeCanBond();
+        sim.randomizeValence();
+        sim.randomizeParams();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("弱い力・結合可否・価数・共通パラメータをまとめてランダム化 (粒子はそのまま)");
     if (!st.msg.empty()) ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f), "%s", st.msg.c_str());
     ImGui::Separator();
     WeakTable(sim, st);

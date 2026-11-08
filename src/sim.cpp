@@ -237,6 +237,35 @@ void Simulation::randomizeWeak() {
         for (int b = 0; b < numTypes; ++b) weak[a][b] = std::round(U(rng_) * 100.0f) / 100.0f;
 }
 
+void Simulation::randomizeCanBond() {
+    std::bernoulli_distribution B(0.5);
+    for (int a = 0; a < numTypes; ++a)
+        for (int b = a; b < numTypes; ++b) setCanBond(a, b, B(rng_));
+}
+
+void Simulation::randomizeValence() {
+    std::uniform_int_distribution<int> U(0, kMaxBonds);
+    for (int a = 0; a < numTypes; ++a) valence[a] = U(rng_);
+}
+
+void Simulation::randomizeParams() {
+    std::uniform_real_distribution<float> U(0.0f, 1.0f);
+    auto lin = [&](float lo, float hi) { return lo + (hi - lo) * U(rng_); };
+    auto logu = [&](float lo, float hi) { return lo * std::pow(hi / lo, U(rng_)); };
+    const float maxR = world * 0.45f;
+    p.rMax = std::min(logu(0.03f, 0.15f), maxR);
+    p.beta = lin(0.1f, 0.5f);
+    p.frictionHalfLife = logu(0.01f, 0.2f);
+    p.forceFactor = lin(2.0f, 30.0f);
+    p.bondLength = logu(0.005f, 0.04f);
+    p.springK = lin(50.0f, 1000.0f);
+    p.bondDist = std::min(p.bondLength * lin(1.0f, 1.8f), maxR);
+    p.breakDist = p.bondDist * lin(1.5f, 3.0f);
+    p.bondProb = logu(0.005f, 0.5f);
+    p.breakProb = logu(1e-5f, 1e-2f);
+    p.thermal = lin(0.0f, 0.5f);
+}
+
 void Simulation::buildGrid() {
     const int n = count();
     float cell = std::min(std::max(p.rMax, p.bondDist), world * 0.45f);
