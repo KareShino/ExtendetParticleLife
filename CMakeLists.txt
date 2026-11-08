@@ -33,11 +33,8 @@ FetchContent_Declare(imgui
 FetchContent_Declare(json
   URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
 
-FetchContent_MakeAvailable(glfw json)
-FetchContent_GetProperties(imgui)
-if(NOT imgui_POPULATED)
-  FetchContent_Populate(imgui)
-endif()
+# imgui は CMakeLists.txt を持たないので取得のみ行われる
+FetchContent_MakeAvailable(glfw json imgui)
 
 add_library(imgui STATIC
   ${imgui_SOURCE_DIR}/imgui.cpp

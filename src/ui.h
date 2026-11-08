@@ -15,7 +15,9 @@ struct AppState {
 
     // 実行
     bool paused = false;
-    int stepsPerFrame = 1;
+    float speed = 1.0f;       // 再生速度 (1 フレームあたりの平均ステップ数)
+    float stepAcc = 0.0f;     // 端数ステップの蓄積
+    float worldEdit = 1.0f;   // 世界の広さ (スライダー編集中の値)
     double simMs = 0.0;
 
     // 表示

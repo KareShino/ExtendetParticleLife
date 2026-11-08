@@ -42,9 +42,11 @@ bool Renderer::init() {
 layout(location=0) in vec2 aPos;
 layout(location=1) in vec4 aCol;
 uniform float uPointSize;
+uniform float uInvWorld;
 out vec4 vCol;
 void main(){
-    gl_Position = vec4(aPos.x*2.0-1.0, 1.0-aPos.y*2.0, 0.0, 1.0);
+    vec2 p = aPos * uInvWorld;
+    gl_Position = vec4(p.x*2.0-1.0, 1.0-p.y*2.0, 0.0, 1.0);
     gl_PointSize = uPointSize;
     vCol = aCol;
 })";
@@ -72,6 +74,7 @@ void main(){
     if (!ok) return false;
     uPointSize_ = glGetUniformLocation(prog_, "uPointSize");
     uRound_ = glGetUniformLocation(prog_, "uRound");
+    uInvWorld_ = glGetUniformLocation(prog_, "uInvWorld");
 
     glGenVertexArrays(1, &vao_);
     glGenBuffers(1, &vbo_);
@@ -111,6 +114,8 @@ void Renderer::draw(const Simulation& sim, int fbX, int fbY, int fbW, int fbH, f
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(prog_);
+    glUniform1f(uInvWorld_, 1.0f / sim.world);
+    const float W = sim.world, H = 0.5f * W;
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
 
@@ -126,11 +131,11 @@ void Renderer::draw(const Simulation& sim, int fbX, int fbY, int fbW, int fbH, f
                 if (j <= i) continue;
                 float dx = sim.x[j] - sim.x[i], dy = sim.y[j] - sim.y[i];
                 const uint8_t* c = pal[sim.type[i]];
-                if (std::fabs(dx) <= 0.5f && std::fabs(dy) <= 0.5f) {
+                if (std::fabs(dx) <= H && std::fabs(dy) <= H) {
                     push(sim.x[i], sim.y[i], sim.x[j], sim.y[j], c);
-                } else {  // 境界をまたぐ結合は両側に半分ずつ描く
-                    if (dx > 0.5f) dx -= 1.0f; else if (dx < -0.5f) dx += 1.0f;
-                    if (dy > 0.5f) dy -= 1.0f; else if (dy < -0.5f) dy += 1.0f;
+                } else {  // 境界をまたぐ結合は両側に描く (はみ出しは scissor で切る)
+                    if (dx > H) dx -= W; else if (dx < -H) dx += W;
+                    if (dy > H) dy -= W; else if (dy < -H) dy += W;
                     push(sim.x[i], sim.y[i], sim.x[i] + dx, sim.y[i] + dy, c);
                     push(sim.x[j], sim.y[j], sim.x[j] - dx, sim.y[j] - dy, c);
                 }

@@ -20,15 +20,6 @@ inline uint32_t hash3(uint32_t a, uint32_t b, uint32_t c) {
 }
 inline float u01(uint32_t h) { return (h >> 8) * (1.0f / 16777216.0f); }
 
-inline float wrapDelta(float d) {
-    if (d > 0.5f) d -= 1.0f;
-    else if (d < -0.5f) d += 1.0f;
-    return d;
-}
-inline float wrapPos(float v) {
-    v -= std::floor(v);
-    return v >= 1.0f ? 0.0f : v;
-}
 
 }  // namespace
 
@@ -42,8 +33,8 @@ int Simulation::totalBonds() const {
 
 bool Simulation::addParticle(float px, float py, int t, int cap) {
     if (count() >= cap || t < 0 || t >= numTypes) return false;
-    x.push_back(wrapPos(px));
-    y.push_back(wrapPos(py));
+    x.push_back(wp(px));
+    y.push_back(wp(py));
     vx.push_back(0.0f);
     vy.push_back(0.0f);
     type.push_back((uint8_t)t);
@@ -88,7 +79,7 @@ void Simulation::removeInRadius(float cx, float cy, float r) {
     const float r2 = r * r;
     bool any = false;
     for (int i = 0; i < n; ++i) {
-        float dx = wrapDelta(x[i] - cx), dy = wrapDelta(y[i] - cy);
+        float dx = wd(x[i] - cx), dy = wd(y[i] - cy);
         if (dx * dx + dy * dy < r2) mask[i] = 1, any = true;
     }
     if (any) removeParticles(mask);
@@ -113,7 +104,7 @@ void Simulation::randomFill(int total, const float* ratios) {
     std::uniform_real_distribution<float> U(0.0f, 1.0f);
     x.reserve(total);
     for (int t = 0; t < numTypes; ++t)
-        for (int k = 0; k < counts[t]; ++k) addParticle(U(rng_), U(rng_), t, total);
+        for (int k = 0; k < counts[t]; ++k) addParticle(U(rng_) * world, U(rng_) * world, t, total);
     // 種類ごとに並ばないようシャッフル (結合なしなので単純に入れ替え可)
     const int n = count();
     for (int i = n - 1; i > 0; --i) {
@@ -170,14 +161,15 @@ void Simulation::randomizeWeak() {
 
 void Simulation::buildGrid() {
     const int n = count();
-    float cell = std::max(p.rMax, p.bondDist);
-    gridN_ = std::max(1, std::min(256, (int)(1.0f / cell)));
+    float cell = std::min(std::max(p.rMax, p.bondDist), world * 0.45f);
+    gridN_ = std::max(1, std::min(256, (int)(world / cell)));
     const int G = gridN_, cells = G * G;
+    const float invCell = G / world;
     cellStart_.assign(cells + 1, 0);
     cellOf_.resize(n);
     for (int i = 0; i < n; ++i) {
-        int cx = std::min(G - 1, (int)(x[i] * G));
-        int cy = std::min(G - 1, (int)(y[i] * G));
+        int cx = std::min(G - 1, (int)(x[i] * invCell));
+        int cy = std::min(G - 1, (int)(y[i] * invCell));
         int c = cx + cy * G;
         cellOf_[i] = c;
         ++cellStart_[c + 1];
@@ -206,7 +198,7 @@ void Simulation::step() {
     for (auto& c : candidates_) c.clear();
 
     const int G = gridN_;
-    const float rMax = p.rMax, rMax2 = rMax * rMax, invR = 1.0f / rMax;
+    const float rMax = std::min(p.rMax, world * 0.45f), rMax2 = rMax * rMax, invR = 1.0f / rMax;
     const float beta = std::clamp(p.beta, 0.01f, 0.99f), invBeta = 1.0f / beta, inv1mb = 1.0f / (1.0f - beta);
     const float ff = rMax * p.forceFactor;
     const float bondD2 = p.bondDist * p.bondDist;
@@ -238,7 +230,7 @@ void Simulation::step() {
                 const int end = cellStart_[nb[q] + 1];
                 for (int m = cellStart_[nb[q]]; m < end; ++m) {
                     if (m == kk) continue;
-                    float ddx = wrapDelta(sx_[m] - xi), ddy = wrapDelta(sy_[m] - yi);
+                    float ddx = wd(sx_[m] - xi), ddy = wd(sy_[m] - yi);
                     float d2 = ddx * ddx + ddy * ddy;
                     if (d2 >= rMax2 || d2 < 1e-12f) continue;
                     const float d = std::sqrt(d2), r = d * invR;
@@ -269,7 +261,7 @@ void Simulation::step() {
                 for (int s = 0; s < kMaxBonds; ++s) {
                     const int j = bonds[i][s];
                     if (j < 0) continue;
-                    float ddx = wrapDelta(x[j] - xi), ddy = wrapDelta(y[j] - yi);
+                    float ddx = wd(x[j] - xi), ddy = wd(y[j] - yi);
                     float d = std::sqrt(ddx * ddx + ddy * ddy);
                     if (d < 1e-7f) continue;
                     float fs = k * (d - L) / d;
@@ -296,8 +288,8 @@ void Simulation::step() {
             }
             vx[i] = vx[i] * fric + ax_[i] * dt + nx;
             vy[i] = vy[i] * fric + ay_[i] * dt + ny;
-            x[i] = wrapPos(x[i] + vx[i] * dt);
-            y[i] = wrapPos(y[i] + vy[i] * dt);
+            x[i] = wp(x[i] + vx[i] * dt);
+            y[i] = wp(y[i] + vy[i] * dt);
         }
     });
 
@@ -340,7 +332,7 @@ void Simulation::breakBonds() {
             // 価数の超過 (価数を下げた場合) は常に切る
             if (bondCount[i] > valence[ti]) { unlink(i, s); continue; }
             if (j < i) continue;  // ペアは小さい方の添字側で 1 回だけ判定
-            float dx = wrapDelta(x[j] - x[i]), dy = wrapDelta(y[j] - y[i]);
+            float dx = wd(x[j] - x[i]), dy = wd(y[j] - y[i]);
             bool cut = dx * dx + dy * dy > bd2 || !canBond[ti][type[j]] ||
                        (thresh > 0 && (hash3(seed, (uint32_t)i, (uint32_t)j) >> 8) < thresh);
             if (cut) unlink(i, s);

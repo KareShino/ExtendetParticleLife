@@ -101,6 +101,7 @@ int main(int argc, char** argv) {
     Simulation sim(pool);
     AppState st;
     if (argc > 1) st.cap = std::clamp(std::atoi(argv[1]), 0, 30000);  // 任意: 初期粒子数
+    if (argc > 2) sim.world = st.worldEdit = std::clamp((float)std::atof(argv[2]), 0.5f, 5.0f);  // 任意: 世界の広さ
     SetupInitialScene(sim, st);
 
     while (!glfwWindowShouldClose(win)) {
@@ -112,7 +113,10 @@ int main(int argc, char** argv) {
 
         if (!st.paused) {
             auto t0 = std::chrono::steady_clock::now();
-            for (int i = 0; i < st.stepsPerFrame; ++i) sim.step();
+            st.stepAcc += st.speed;
+            const int steps = std::min(20, (int)st.stepAcc);
+            st.stepAcc -= (float)(int)st.stepAcc;
+            for (int i = 0; i < steps; ++i) sim.step();
             double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             st.simMs = st.simMs * 0.9 + ms * 0.1;
         }
@@ -133,7 +137,7 @@ int main(int argc, char** argv) {
         glClear(GL_COLOR_BUFFER_BIT);
         const int px = (int)(st.pvX * sx), pw = (int)(st.pvW * sx), ph = (int)(st.pvH * sy);
         const int py = fbH - (int)(st.pvY * sy) - ph;  // 左下原点へ変換
-        renderer.draw(sim, px, py, pw, ph, st.pointPx * xs, st.showBonds, st.sat, st.val);
+        renderer.draw(sim, px, py, pw, ph, std::max(1.5f, st.pointPx * xs / sim.world), st.showBonds, st.sat, st.val);
         glViewport(0, 0, fbW, fbH);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(win);

@@ -20,6 +20,6 @@ public:
 private:
     struct Vtx { float x, y; uint8_t r, g, b, a; };
     unsigned prog_ = 0, vao_ = 0, vbo_ = 0;
-    int uPointSize_ = -1, uRound_ = -1;
+    int uPointSize_ = -1, uRound_ = -1, uInvWorld_ = -1;
     std::vector<Vtx> pts_, lines_;
 };

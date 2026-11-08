@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <random>
 #include <utility>
@@ -35,6 +36,7 @@ public:
     bool canBond[kMaxTypes][kMaxTypes] = {};  // 対称
     int valence[kMaxTypes] = {};              // 0..kMaxBonds
     SimParams p;
+    float world = 1.0f;  // ループ空間の一辺 (距離系パラメータはこの単位系)
 
     // ---- 粒子 (配列ベース) ----
     std::vector<float> x, y, vx, vy;
@@ -64,6 +66,19 @@ private:
     void formBonds();
     void breakBonds();
     void unlink(int i, int slot);
+public:
+    float wd(float d) const {  // 最短像での差分
+        const float h = 0.5f * world;
+        if (d > h) d -= world;
+        else if (d < -h) d += world;
+        return d;
+    }
+    float wp(float v) const {  // [0, world) に折り返す
+        v -= std::floor(v / world) * world;
+        return v >= world ? 0.0f : v;
+    }
+
+private:
     bool isBonded(int i, int j) const {
         const auto& b = bonds[i];
         return b[0] == j || b[1] == j || b[2] == j || b[3] == j;

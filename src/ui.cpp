@@ -40,7 +40,8 @@ void ParamsSection(Simulation& sim, AppState& st) {
     if (!ImGui::CollapsingHeader("共通パラメータ", ImGuiTreeNodeFlags_DefaultOpen)) return;
     auto& p = sim.p;
     ImGui::PushItemWidth(-130.0f);
-    ImGui::SliderFloat("最大距離", &p.rMax, 0.01f, 0.3f, "%.3f");
+    ImGui::SliderFloat("最大距離", &p.rMax, 0.01f, std::min(0.3f, sim.world * 0.45f), "%.3f");
+    p.rMax = std::min(p.rMax, sim.world * 0.45f);
     ImGui::SliderFloat("β", &p.beta, 0.05f, 0.9f, "%.2f");
     HelpMarker("r/最大距離 が β 未満では全種類共通の斥力");
     ImGui::SliderFloat("摩擦(半減時間)", &p.frictionHalfLife, 0.005f, 0.5f, "%.3f", ImGuiSliderFlags_Logarithmic);
@@ -54,7 +55,6 @@ void ParamsSection(Simulation& sim, AppState& st) {
     ImGui::SliderFloat("切断確率", &p.breakProb, 0.0f, 0.1f, "%.5f", ImGuiSliderFlags_Logarithmic);
     HelpMarker("結合確率・切断確率は 1 ステップあたり");
     ImGui::SliderFloat("熱ゆらぎ強度", &p.thermal, 0.0f, 2.0f, "%.3f");
-    ImGui::SliderInt("ステップ/フレーム", &st.stepsPerFrame, 1, 10);
     ImGui::PopItemWidth();
     p.breakDist = std::max(p.breakDist, p.bondDist);
 }
@@ -215,6 +215,12 @@ void RightPanel(Simulation& sim, AppState& st, float x, float w, float h) {
     ImGui::Text("%.0f FPS   計算 %.2f ms/フレーム", ImGui::GetIO().Framerate, st.simMs);
     if (ImGui::Button(st.paused ? "再開" : "一時停止")) st.paused = !st.paused;
     ImGui::SameLine();
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+    ImGui::SliderFloat("##speed", &st.speed, 0.1f, 10.0f, "再生速度 %.2fx",
+                       ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("1x = 1フレーム1ステップ。ダブルクリック/Ctrl+クリックで数値入力、右クリックで 1x に戻す");
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) st.speed = 1.0f;
+    ImGui::SameLine();
     ImGui::BeginDisabled(sim.numTypes >= kMaxTypes);
     if (ImGui::Button("種類を追加")) {
         sim.addType();
@@ -245,6 +251,15 @@ void BottomPanel(Simulation& sim, AppState& st, float y, float w, float h) {
     ImGui::RadioButton("ランダム配置", &st.mode, 1);
     ImGui::SameLine(0, 30);
     if (ImGui::Button("全消去")) sim.clearParticles();
+    ImGui::SameLine(0, 30);
+    ImGui::SetNextItemWidth(200.0f);
+    ImGui::SliderFloat("世界の広さ", &st.worldEdit, 0.5f, 5.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    if (ImGui::IsItemDeactivatedAfterEdit() && st.worldEdit != sim.world) {
+        sim.world = st.worldEdit;
+        sim.p.rMax = std::min(sim.p.rMax, sim.world * 0.45f);
+        sim.randomFill(st.cap, st.ratios);  // 広さ変更時は全消去して再生成
+    }
+    HelpMarker("ループ空間の一辺の長さ。最大距離・ボンド長などはそのまま。\n変更を確定すると全消去し、ランダム配置の比率で上限数まで再生成します");
     ImGui::Separator();
 
     if (st.mode == 0) {
@@ -308,9 +323,9 @@ void HandlePreviewInput(Simulation& sim, AppState& st) {
     const bool inside = mp.x >= ox && mp.x < ox + side && mp.y >= oy && mp.y < oy + side;
     if (!inside || io.WantCaptureMouse) return;
 
-    const float wx = (mp.x - ox) / side, wy = (mp.y - oy) / side;
+    const float wx = (mp.x - ox) / side * sim.world, wy = (mp.y - oy) / side * sim.world;
     // ブラシ表示
-    ImGui::GetForegroundDrawList()->AddCircle(mp, st.brushRadius * side, IM_COL32(255, 255, 255, 120), 48);
+    ImGui::GetForegroundDrawList()->AddCircle(mp, st.brushRadius / sim.world * side, IM_COL32(255, 255, 255, 120), 48);
 
     static std::mt19937 rng{12345};
     std::uniform_real_distribution<float> U(0.0f, 1.0f);
